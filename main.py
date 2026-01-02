@@ -4,102 +4,190 @@ import keyboard
 import subprocess
 import threading
 import pystray
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageGrab
 import sys
 import os
+import time
+import io
+import clipboard
+from google import genai
+from google.genai import types
 
+# --- Cấu hình Gemini ---
+# Lưu ý: Đảm bảo bạn đã set biến môi trường GEMINI_API_KEY
+def get_gemini_client():
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        # Nếu không có biến môi trường, bạn có thể dán trực tiếp key vào đây để test
+        # api_key = "YOUR_API_KEY_HERE"
+        raise ValueError("GEMINI_API_KEY chưa được thiết lập.")
+    return genai.Client(api_key=api_key)
+
+# --- Lớp hiển thị Overlay kết quả ---
+class OverlayAnswer:
+    def __init__(self, text):
+        self.win = tk.Toplevel()
+        self.win.overrideredirect(True)  # Xóa thanh tiêu đề
+        self.win.attributes("-topmost", True)  # Luôn hiện trên cùng
+        self.win.attributes("-alpha", 0.3)  # Mờ mặc định
+        
+        # Giao diện
+        label_text = f"Gemini: {text}"
+        self.label = tk.Label(self.win, text=label_text, bg="#2c3e50", fg="white", 
+                              padx=10, pady=10, font=("Arial", 10), wraplength=250, justify="left")
+        self.label.pack()
+
+        # Nút đóng nhỏ
+        self.close_btn = tk.Button(self.win, text="X", command=self.win.destroy, 
+                                   bg="#e74c3c", fg="white", bd=0, font=("Arial", 7))
+        self.close_btn.place(relx=1.0, rely=0.0, anchor="ne")
+
+        # Vị trí: Góc dưới bên phải
+        screen_width = self.win.winfo_screenwidth()
+        screen_height = self.win.winfo_screenheight()
+        self.win.update_idletasks()
+        width = self.win.winfo_width()
+        height = self.win.winfo_height()
+        self.win.geometry(f"{width}x{height}+{screen_width - width - 20}+{screen_height - height - 60}")
+
+        # Sự kiện di chuột
+        self.win.bind("<Enter>", lambda e: self.win.attributes("-alpha", 1.0))
+        self.win.bind("<Leave>", lambda e: self.win.attributes("-alpha", 0.3))
+
+        # Tự động đóng sau 10 giây
+        self.win.after(10000, self.win.destroy)
+
+# --- Class Ứng dụng chính ---
 class WifiSwitcherApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("WiFi Switcher")
-        self.root.geometry("350x400")
+        self.root.title("WiFi Gemini Assistant")
+        self.root.geometry("350x450")
         
-        # Biến lưu trữ thông tin
-        self.wifi1_ssid = tk.StringVar()
-        self.wifi2_ssid = tk.StringVar()
-        self.hotkey1 = tk.StringVar(value="f9")
-        self.hotkey2 = tk.StringVar(value="f10")
+        self.wifi1_ssid = tk.StringVar(value="WIFI_NHA_1")
+        self.wifi2_ssid = tk.StringVar(value="WIFI_DUNG_API")
+        self.hotkey_trigger = tk.StringVar(value="ctrl+f8") # Phím tắt để bắt đầu quy trình
 
         self.setup_ui()
-        
-        # Giao diện sẽ ẩn khi đóng thay vì thoát hẳn
         self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
 
     def setup_ui(self):
-        # Frame WiFi 1
-        tk.Label(self.root, text="WiFi 1 (SSID):", font=('Arial', 10, 'bold')).pack(pady=5)
+        tk.Label(self.root, text="WiFi 1 (Chính):", font=('Arial', 10, 'bold')).pack(pady=5)
         tk.Entry(self.root, textvariable=self.wifi1_ssid, width=30).pack()
-        tk.Label(self.root, text="Phím tắt WiFi 1 (VD: f9):").pack()
-        tk.Entry(self.root, textvariable=self.hotkey1, width=10).pack()
 
-        tk.Label(self.root, text="-"*40).pack(pady=10)
-
-        # Frame WiFi 2
-        tk.Label(self.root, text="WiFi 2 (SSID):", font=('Arial', 10, 'bold')).pack(pady=5)
+        tk.Label(self.root, text="WiFi 2 (Để gọi API):", font=('Arial', 10, 'bold')).pack(pady=5)
         tk.Entry(self.root, textvariable=self.wifi2_ssid, width=30).pack()
-        tk.Label(self.root, text="Phím tắt WiFi 2 (VD: f10):").pack()
-        tk.Entry(self.root, textvariable=self.hotkey2, width=10).pack()
 
-        # Nút điều khiển
-        tk.Button(self.root, text="Lưu & Kích hoạt phím tắt", command=self.start_listening, bg="green", fg="white").pack(pady=20)
-        tk.Label(self.root, text="Ứng dụng sẽ chạy ngầm dưới khay hệ thống", font=('Arial', 8, 'italic')).pack()
+        tk.Label(self.root, text="Phím tắt kích hoạt (VD: ctrl+f8):").pack(pady=5)
+        tk.Entry(self.root, textvariable=self.hotkey_trigger, width=15).pack()
+
+        tk.Button(self.root, text="Lưu & Kích hoạt", command=self.start_listening, bg="#27ae60", fg="white", height=2).pack(pady=20)
+        tk.Label(self.root, text="Cách dùng: Nhấn phím tắt, máy sẽ đổi WiFi,\nhỏi Gemini từ Clipboard/Ảnh và đổi về.", font=('Arial', 8, 'italic')).pack()
 
     def connect_wifi(self, ssid):
-        """Hàm thực hiện kết nối WiFi bằng lệnh netsh"""
         try:
-            print(f"Đang kết nối tới: {ssid}...")
-            # Lưu ý: Profile WiFi phải đã tồn tại trên máy (đã từng đăng nhập trước đó)
-            result = subprocess.run(f'netsh wlan connect name="{ssid}"', capture_output=True, text=True, shell=True)
-            if "thành công" in result.stdout or "successfully" in result.stdout.lower():
-                print(f"Đã chuyển sang {ssid}")
-            else:
-                print(f"Lỗi: {result.stdout}")
+            subprocess.run(f'netsh wlan connect name="{ssid}"', shell=True, capture_output=True)
+            # Chờ một chút để kết nối ổn định
+            time.sleep(3) 
+            return True
         except Exception as e:
-            print(f"Lỗi thực thi: {e}")
+            print(f"Lỗi kết nối WiFi: {e}")
+            return False
+
+    def is_connected(self):
+        """Kiểm tra xem có internet chưa"""
+        try:
+            # Ping thử tới Google DNS
+            subprocess.check_call(["ping", "-n", "1", "8.8.8.8"], stdout=subprocess.DEVNULL, timeout=2)
+            return True
+        except:
+            return False
+
+    def process_gemini_workflow(self):
+        """Quy trình chính: Đổi mạng -> Hỏi -> Đổi lại"""
+        try:
+            print("Bắt đầu quy trình...")
+            # 1. Chuyển sang WiFi 2
+            self.connect_wifi(self.wifi2_ssid.get())
+            
+            # Đợi tối đa 10 giây để có internet
+            retries = 0
+            while not self.is_connected() and retries < 5:
+                time.sleep(2)
+                retries += 1
+
+            # 2. Lấy dữ liệu (Ưu tiên ảnh trong clipboard, nếu không thì lấy text)
+            answer = "Không có dữ liệu trong clipboard."
+            client = get_gemini_client()
+            prompt = "Trả lời thật ngắn gọn đáp án (VD: A.12):"
+
+            img = ImageGrab.grabclipboard()
+            if isinstance(img, Image.Image):
+                # Xử lý ảnh
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash", # Cập nhật model mới nhất
+                    contents=[prompt, types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type='image/png')]
+                )
+                answer = response.text
+            else:
+                # Xử lý text
+                text_content = clipboard.paste()
+                if text_content:
+                    response = client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=f"{prompt} {text_content}"
+                    )
+                    answer = response.text
+
+            # 3. Chuyển về WiFi 1
+            print(f"Kết quả: {answer}. Đang quay về WiFi chính...")
+            self.connect_wifi(self.wifi1_ssid.get())
+
+            # 4. Hiển thị Overlay (Phải chạy trong thread chính của Tkinter)
+            self.root.after(0, lambda: OverlayAnswer(answer))
+
+        except Exception as e:
+            print(f"Lỗi quy trình: {e}")
+            self.connect_wifi(self.wifi1_ssid.get()) # Trả về wifi 1 nếu lỗi
 
     def start_listening(self):
-        """Đăng ký phím tắt"""
         try:
-            # Xóa các hotkey cũ nếu có
             keyboard.unhook_all()
+            # Khi nhấn phím tắt, chạy quy trình trong thread mới để không treo app
+            keyboard.add_hotkey(self.hotkey_trigger.get(), 
+                                lambda: threading.Thread(target=self.process_gemini_workflow, daemon=True).start())
             
-            # Đăng ký hotkey mới
-            keyboard.add_hotkey(self.hotkey1.get(), lambda: self.connect_wifi(self.wifi1_ssid.get()))
-            keyboard.add_hotkey(self.hotkey2.get(), lambda: self.connect_wifi(self.wifi2_ssid.get()))
-            
-            messagebox.showinfo("Thông báo", "Đã kích hoạt phím tắt thành công!")
+            messagebox.showinfo("Thông báo", f"Đã kích hoạt! Nhấn {self.hotkey_trigger.get()} để bắt đầu.")
             self.hide_window()
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không thể thiết lập phím tắt: {e}")
 
     def hide_window(self):
-        self.root.withdraw() # Ẩn cửa sổ
+        self.root.withdraw()
         self.create_tray_icon()
 
     def show_window(self, icon, item):
-        icon.stop() # Dừng tray icon
-        self.root.after(0, self.root.deiconify) # Hiện lại cửa sổ
+        icon.stop()
+        self.root.after(0, self.root.deiconify)
 
     def quit_app(self, icon, item):
         icon.stop()
         self.root.quit()
-        sys.exit()
+        os._exit(0)
 
     def create_tray_icon(self):
-        # Tạo icon đơn giản bằng Pillow
-        width = 64
-        height = 64
-        image = Image.new('RGB', (width, height), (255, 255, 255))
+        width, height = 64, 64
+        image = Image.new('RGB', (width, height), (46, 204, 113))
         dc = ImageDraw.Draw(image)
-        dc.rectangle((width // 4, height // 4, width * 3 // 4, height * 3 // 4), fill=(0, 120, 215))
+        dc.ellipse((10, 10, 54, 54), fill=(255, 255, 255))
 
         menu = pystray.Menu(
             pystray.MenuItem('Hiện cài đặt', self.show_window),
             pystray.MenuItem('Thoát', self.quit_app)
         )
-        
-        self.icon = pystray.Icon("WifiSwitcher", image, "WiFi Switcher", menu)
-        # Chạy tray icon trong một thread riêng để không treo UI
+        self.icon = pystray.Icon("WifiGemini", image, "WiFi Gemini Assistant", menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
 
 if __name__ == "__main__":
