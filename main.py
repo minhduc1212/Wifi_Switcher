@@ -116,7 +116,7 @@ class WifiSwitcherApp:
                 img_byte_arr = io.BytesIO()
                 img.save(img_byte_arr, format='PNG')
                 response = client.models.generate_content(
-                    model="gemini-2.0-flash", # Cập nhật model mới nhất
+                    model="gemini-2.5-flash", # Cập nhật model mới nhất
                     contents=[prompt, types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type='image/png')]
                 )
                 answer = response.text
@@ -125,7 +125,7 @@ class WifiSwitcherApp:
                 text_content = clipboard.paste()
                 if text_content:
                     response = client.models.generate_content(
-                        model="gemini-2.0-flash",
+                        model="gemini-2.5-flash",
                         contents=f"{prompt} {text_content}"
                     )
                     answer = response.text
