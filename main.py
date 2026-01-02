@@ -12,37 +12,33 @@ import io
 import clipboard
 from google import genai
 from google.genai import types
+from dotenv import load_dotenv
 
-# --- Cấu hình Gemini ---
-# Lưu ý: Đảm bảo bạn đã set biến môi trường GEMINI_API_KEY
+load_dotenv() 
+
 def get_gemini_client():
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        # Nếu không có biến môi trường, bạn có thể dán trực tiếp key vào đây để test
-        # api_key = "YOUR_API_KEY_HERE"
+
         raise ValueError("GEMINI_API_KEY chưa được thiết lập.")
     return genai.Client(api_key=api_key)
 
-# --- Lớp hiển thị Overlay kết quả ---
 class OverlayAnswer:
     def __init__(self, text):
         self.win = tk.Toplevel()
-        self.win.overrideredirect(True)  # Xóa thanh tiêu đề
-        self.win.attributes("-topmost", True)  # Luôn hiện trên cùng
-        self.win.attributes("-alpha", 0.3)  # Mờ mặc định
+        self.win.overrideredirect(True)  
+        self.win.attributes("-topmost", True)  
+        self.win.attributes("-alpha", 0.3)  
         
-        # Giao diện
         label_text = f"Gemini: {text}"
         self.label = tk.Label(self.win, text=label_text, bg="#2c3e50", fg="white", 
                               padx=10, pady=10, font=("Arial", 10), wraplength=250, justify="left")
         self.label.pack()
 
-        # Nút đóng nhỏ
         self.close_btn = tk.Button(self.win, text="X", command=self.win.destroy, 
                                    bg="#e74c3c", fg="white", bd=0, font=("Arial", 7))
         self.close_btn.place(relx=1.0, rely=0.0, anchor="ne")
 
-        # Vị trí: Góc dưới bên phải
         screen_width = self.win.winfo_screenwidth()
         screen_height = self.win.winfo_screenheight()
         self.win.update_idletasks()
@@ -50,14 +46,10 @@ class OverlayAnswer:
         height = self.win.winfo_height()
         self.win.geometry(f"{width}x{height}+{screen_width - width - 20}+{screen_height - height - 60}")
 
-        # Sự kiện di chuột
         self.win.bind("<Enter>", lambda e: self.win.attributes("-alpha", 1.0))
         self.win.bind("<Leave>", lambda e: self.win.attributes("-alpha", 0.3))
-
-        # Tự động đóng sau 10 giây
         self.win.after(10000, self.win.destroy)
-
-# --- Class Ứng dụng chính ---
+        
 class WifiSwitcherApp:
     def __init__(self, root):
         self.root = root
@@ -107,19 +99,16 @@ class WifiSwitcherApp:
         """Quy trình chính: Đổi mạng -> Hỏi -> Đổi lại"""
         try:
             print("Bắt đầu quy trình...")
-            # 1. Chuyển sang WiFi 2
             self.connect_wifi(self.wifi2_ssid.get())
             
-            # Đợi tối đa 10 giây để có internet
             retries = 0
             while not self.is_connected() and retries < 5:
                 time.sleep(2)
                 retries += 1
 
-            # 2. Lấy dữ liệu (Ưu tiên ảnh trong clipboard, nếu không thì lấy text)
             answer = "Không có dữ liệu trong clipboard."
             client = get_gemini_client()
-            prompt = "Trả lời thật ngắn gọn đáp án (VD: A.12):"
+            prompt = "Trả lời thật ngắn gọn chỉ có tên đáp án và nội dung đáp án đó (VD: A.12):"
 
             img = ImageGrab.grabclipboard()
             if isinstance(img, Image.Image):
