@@ -22,114 +22,227 @@ def get_gemini_client():
         raise ValueError("GEMINI_API_KEY chưa được thiết lập.")
     return genai.Client(api_key=api_key)
 
-class OverlayAnswer:
+class StealthOverlay:
     def __init__(self, root):
         self.root = root
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.attributes("-transparentcolor", "systemTransparent") # Hỗ trợ nền trong suốt nếu cần
-        self.win.config(bg="systemTransparent")
+        self.win.attributes("-alpha", 0.0)  # Bắt đầu trong suốt hoàn toàn
         
-        # Biến trạng thái
+        # Trạng thái
         self.full_text = ""
         self.is_loading = False
-        self.blink_state = True
-
-        # Kích thước
-        self.dot_size = 20
-        self.expanded_width = 300
-
-        # UI: Chấm nhỏ
-        self.canvas = tk.Canvas(self.win, width=self.dot_size, height=self.dot_size, 
-                               bg="systemTransparent", highlightthickness=0)
-        self.dot = self.canvas.create_oval(2, 2, self.dot_size-2, self.dot_size-2, fill="orange", outline="")
-        self.canvas.pack(side="right")
-
-        # UI: Nhãn câu trả lời (ẩn lúc đầu)
-        self.label = tk.Label(self.win, text="", bg="#2c3e50", fg="white", 
-                              padx=10, pady=10, font=("Arial", 10), wraplength=250, justify="left")
+        self.is_expanded = False
+        self.auto_hide_timer = None
         
-        # Vị trí góc dưới bên phải
+        # Kích thước nhỏ gọn
+        self.collapsed_size = 8
+        self.min_width = 60
+        self.max_width = 200
+        self.padding = 20
+        
+        # Container chính với bo góc
+        self.container = tk.Frame(self.win, bg="#1a1a1a", highlightthickness=0)
+        self.container.pack(fill="both", expand=True)
+        
+        # Indicator dot (trạng thái thu gọn)
+        self.dot_canvas = tk.Canvas(self.container, width=self.collapsed_size, 
+                                    height=self.collapsed_size, bg="#1a1a1a", 
+                                    highlightthickness=0, bd=0)
+        self.dot = self.dot_canvas.create_oval(1, 1, self.collapsed_size-1, 
+                                               self.collapsed_size-1, 
+                                               fill="#555555", outline="")
+        self.dot_canvas.pack()
+        
+        # Panel mở rộng (ẩn ban đầu)
+        self.expanded_frame = tk.Frame(self.container, bg="#1a1a1a")
+        
+        # Header nhỏ gọn
+        self.header = tk.Frame(self.expanded_frame, bg="#2a2a2a", height=20)
+        self.header.pack(fill="x")
+        self.header.pack_propagate(False)
+        
+        self.status_label = tk.Label(self.header, text="●", bg="#2a2a2a", 
+                                     fg="#888888", font=("Segoe UI", 8))
+        self.status_label.pack(side="left", padx=5)
+        
+        # Nội dung câu trả lời
+        self.answer_label = tk.Label(self.expanded_frame, text="", 
+                                     bg="#1a1a1a", fg="#e0e0e0",
+                                     font=("Segoe UI", 10, "bold"),
+                                     justify="center", padx=8, pady=6)
+        self.answer_label.pack()
+        
+        # Vị trí
         self.screen_w = self.win.winfo_screenwidth()
         self.screen_h = self.win.winfo_screenheight()
-        self.update_position(expanded=False)
-
-        # Sự kiện
-        self.win.bind("<Enter>", self.expand)
-        self.win.bind("<Leave>", self.collapse)
+        self.position_window(collapsed=True)
         
-        self.win.withdraw() # Ẩn lúc khởi tạo
-
-    def update_position(self, expanded=False):
+        # Events
+        self.win.bind("<Enter>", self.on_hover_enter)
+        self.win.bind("<Leave>", self.on_hover_leave)
+        
+        self.win.withdraw()
+        
+    def position_window(self, collapsed=True):
         self.win.update_idletasks()
-        w = self.win.winfo_width()
-        h = self.win.winfo_height()
-        # Đặt ở góc dưới bên phải, cách lề 20px
-        self.win.geometry(f"+{self.screen_w - w - 20}+{self.screen_h - h - 60}")
-
+        
+        if collapsed:
+            w, h = self.collapsed_size, self.collapsed_size
+            x = self.screen_w - w - 5
+            y = self.screen_h - h - 50
+        else:
+            # Tính toán kích thước dựa trên nội dung
+            w = self.answer_label.winfo_reqwidth() + self.padding
+            h = self.answer_label.winfo_reqheight() + 20  # +20 cho header
+            
+            # Giới hạn kích thước
+            w = max(self.min_width, min(w, self.max_width))
+            
+            x = self.screen_w - w - 10
+            y = self.screen_h - h - 60
+        
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+    
+    def fade_in(self, target_alpha=0.95, step=0.1):
+        current = self.win.attributes("-alpha")
+        if current < target_alpha:
+            self.win.attributes("-alpha", min(current + step, target_alpha))
+            self.win.after(30, lambda: self.fade_in(target_alpha, step))
+    
+    def fade_out(self, callback=None):
+        current = self.win.attributes("-alpha")
+        if current > 0:
+            self.win.attributes("-alpha", max(current - 0.15, 0))
+            self.win.after(30, lambda: self.fade_out(callback))
+        elif callback:
+            callback()
+    
     def start_loading(self):
         self.is_loading = True
-        self.full_text = "Đang xử lý..."
-        self.canvas.itemconfig(self.dot, fill="orange")
+        self.full_text = ""
+        self.dot_canvas.itemconfig(self.dot, fill="#ff9500")
         self.win.deiconify()
-        self.blink()
-
-    def blink(self):
+        self.fade_in(target_alpha=0.7)
+        self.animate_loading()
+    
+    def animate_loading(self):
         if self.is_loading:
-            color = "orange" if self.blink_state else "#553300"
-            self.canvas.itemconfig(self.dot, fill=color)
-            self.blink_state = not self.blink_state
-            self.win.after(500, self.blink)
-
+            current_color = self.dot_canvas.itemcget(self.dot, "fill")
+            new_color = "#ff9500" if current_color == "#ff6600" else "#ff6600"
+            self.dot_canvas.itemconfig(self.dot, fill=new_color)
+            self.win.after(400, self.animate_loading)
+    
     def set_answer(self, text):
         self.is_loading = False
         self.full_text = text
-        self.canvas.itemconfig(self.dot, fill="#2ecc71") # Xanh lá
-        self.label.config(text=f"Gemini: {text}")
-        # Tự động biến mất sau 15 giây nếu không tương tác
-        self.win.after(15000, self.win.withdraw)
-
-    def expand(self, event=None):
-        if not self.is_loading:
-            self.label.pack(side="left", fill="both", expand=True)
-            self.update_position(expanded=True)
-            self.win.attributes("-alpha", 1.0)
-
-    def collapse(self, event=None):
-        self.label.pack_forget()
-        self.update_position(expanded=False)
+        self.dot_canvas.itemconfig(self.dot, fill="#00ff88")
+        self.answer_label.config(text=text)
+        self.status_label.config(text="●", fg="#00ff88")
+        
+        # Tự động ẩn sau 12 giây
+        if self.auto_hide_timer:
+            self.win.after_cancel(self.auto_hide_timer)
+        self.auto_hide_timer = self.win.after(12000, self.hide_overlay)
+    
+    def on_hover_enter(self, event=None):
+        if not self.is_loading and self.full_text and not self.is_expanded:
+            self.expand()
+    
+    def on_hover_leave(self, event=None):
+        if self.is_expanded:
+            self.collapse()
+    
+    def expand(self):
+        self.is_expanded = True
+        self.dot_canvas.pack_forget()
+        self.expanded_frame.pack(fill="both", expand=True)
+        self.position_window(collapsed=False)
+        self.win.attributes("-alpha", 0.95)
+    
+    def collapse(self):
+        self.is_expanded = False
+        self.expanded_frame.pack_forget()
+        self.dot_canvas.pack()
+        self.position_window(collapsed=True)
         self.win.attributes("-alpha", 0.7)
+    
+    def hide_overlay(self):
+        def after_fade():
+            self.win.withdraw()
+            self.collapse()
+        self.fade_out(callback=after_fade)
 
 class WifiSwitcherApp:
     def __init__(self, root):
         self.root = root
         self.root.title("WiFi Gemini Assistant")
-        self.root.geometry("350x450")
+        self.root.geometry("380x480")
+        self.root.configure(bg="#f5f5f5")
         
         self.wifi1_ssid = tk.StringVar(value="WIFI_NHA_1")
         self.wifi2_ssid = tk.StringVar(value="WIFI_DUNG_API")
         self.hotkey_trigger = tk.StringVar(value="ctrl+f8")
 
-        self.overlay = OverlayAnswer(self.root) # Tạo overlay dùng chung
+        self.overlay = StealthOverlay(self.root)
         self.setup_ui()
         self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
 
     def setup_ui(self):
-        tk.Label(self.root, text="WiFi 1 (Chính):", font=('Arial', 10, 'bold')).pack(pady=5)
-        tk.Entry(self.root, textvariable=self.wifi1_ssid, width=30).pack()
-
-        tk.Label(self.root, text="WiFi 2 (Để gọi API):", font=('Arial', 10, 'bold')).pack(pady=5)
-        tk.Entry(self.root, textvariable=self.wifi2_ssid, width=30).pack()
-
-        tk.Label(self.root, text="Phím tắt kích hoạt:").pack(pady=5)
-        tk.Entry(self.root, textvariable=self.hotkey_trigger, width=15).pack()
-
-        tk.Button(self.root, text="Lưu & Kích hoạt", command=self.start_listening, bg="#27ae60", fg="white", height=2).pack(pady=20)
+        # Header
+        header = tk.Frame(self.root, bg="#2c3e50", height=60)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        
+        tk.Label(header, text="WiFi Gemini Assistant", 
+                bg="#2c3e50", fg="white", 
+                font=("Segoe UI", 14, "bold")).pack(pady=15)
+        
+        # Main content
+        content = tk.Frame(self.root, bg="#f5f5f5")
+        content.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # WiFi 1
+        tk.Label(content, text="WiFi Chính:", bg="#f5f5f5", 
+                font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        entry1 = tk.Entry(content, textvariable=self.wifi1_ssid, 
+                         font=("Segoe UI", 10), relief="solid", bd=1)
+        entry1.pack(fill="x", pady=(0, 15))
+        
+        # WiFi 2
+        tk.Label(content, text="WiFi API:", bg="#f5f5f5", 
+                font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        entry2 = tk.Entry(content, textvariable=self.wifi2_ssid, 
+                         font=("Segoe UI", 10), relief="solid", bd=1)
+        entry2.pack(fill="x", pady=(0, 15))
+        
+        # Hotkey
+        tk.Label(content, text="Phím tắt:", bg="#f5f5f5", 
+                font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        entry3 = tk.Entry(content, textvariable=self.hotkey_trigger, 
+                         font=("Segoe UI", 10), relief="solid", bd=1, width=20)
+        entry3.pack(anchor="w", pady=(0, 20))
+        
+        # Activate button
+        btn = tk.Button(content, text="Kích hoạt", 
+                       command=self.start_listening,
+                       bg="#27ae60", fg="white", 
+                       font=("Segoe UI", 11, "bold"),
+                       relief="flat", cursor="hand2",
+                       height=2)
+        btn.pack(fill="x", pady=10)
+        
+        # Info
+        info_text = "Overlay sẽ xuất hiện ở góc dưới phải màn hình\nDi chuột vào để xem đầy đủ câu trả lời"
+        tk.Label(content, text=info_text, bg="#f5f5f5", 
+                fg="#666666", font=("Segoe UI", 8),
+                justify="center").pack(pady=(20, 0))
 
     def connect_wifi(self, ssid):
         try:
-            subprocess.run(f'netsh wlan connect name="{ssid}"', shell=True, capture_output=True)
+            subprocess.run(f'netsh wlan connect name="{ssid}"', 
+                          shell=True, capture_output=True)
             time.sleep(3) 
             return True
         except Exception as e:
@@ -138,14 +251,14 @@ class WifiSwitcherApp:
 
     def is_connected(self):
         try:
-            subprocess.check_call(["ping", "-n", "1", "8.8.8.8"], stdout=subprocess.DEVNULL, timeout=2)
+            subprocess.check_call(["ping", "-n", "1", "8.8.8.8"], 
+                                stdout=subprocess.DEVNULL, timeout=2)
             return True
         except:
             return False
 
     def process_gemini_workflow(self):
         try:
-            # Hiển thị overlay trạng thái loading ngay lập tức
             self.root.after(0, self.overlay.start_loading)
             
             print("Đang chuyển mạng...")
@@ -156,9 +269,9 @@ class WifiSwitcherApp:
                 time.sleep(2)
                 retries += 1
 
-            answer = "Không tìm thấy nội dung để hỏi."
+            answer = "Không tìm thấy nội dung"
             client = get_gemini_client()
-            prompt = "Trả lời thật ngắn gọn chỉ có tên đáp án và nội dung đáp án đó (VD: A.12):"
+            prompt = "Trả lời ngắn gọn chỉ đáp án (VD: A.12):"
 
             img = ImageGrab.grabclipboard()
             if isinstance(img, Image.Image):
@@ -166,7 +279,8 @@ class WifiSwitcherApp:
                 img.save(img_byte_arr, format='PNG')
                 response = client.models.generate_content(
                     model="gemini-2.5-flash", 
-                    contents=[prompt, types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type='image/png')]
+                    contents=[prompt, types.Part.from_bytes(
+                        data=img_byte_arr.getvalue(), mime_type='image/png')]
                 )
                 answer = response.text
             else:
@@ -178,11 +292,8 @@ class WifiSwitcherApp:
                     )
                     answer = response.text
 
-            # Chuyển về WiFi 1
-            print(f"Kết quả: {answer}. Đang quay về WiFi chính...")
+            print(f"Kết quả: {answer}")
             self.connect_wifi(self.wifi1_ssid.get())
-
-            # Cập nhật kết quả lên Overlay
             self.root.after(0, lambda: self.overlay.set_answer(answer))
 
         except Exception as e:
@@ -193,12 +304,16 @@ class WifiSwitcherApp:
     def start_listening(self):
         try:
             keyboard.unhook_all()
-            keyboard.add_hotkey(self.hotkey_trigger.get(), 
-                                lambda: threading.Thread(target=self.process_gemini_workflow, daemon=True).start())
-            messagebox.showinfo("Thông báo", f"Đã kích hoạt! Nhấn {self.hotkey_trigger.get()} khi cần.")
+            keyboard.add_hotkey(
+                self.hotkey_trigger.get(), 
+                lambda: threading.Thread(
+                    target=self.process_gemini_workflow, daemon=True).start()
+            )
+            messagebox.showinfo("Thành công", 
+                              f"Đã kích hoạt!\nNhấn {self.hotkey_trigger.get()} để sử dụng")
             self.hide_window()
         except Exception as e:
-            messagebox.showerror("Lỗi", f"Không thể thiết lập phím tắt: {e}")
+            messagebox.showerror("Lỗi", f"Không thể thiết lập: {e}")
 
     def hide_window(self):
         self.root.withdraw()
@@ -217,8 +332,12 @@ class WifiSwitcherApp:
         image = Image.new('RGB', (64, 64), (46, 204, 113))
         dc = ImageDraw.Draw(image)
         dc.ellipse((10, 10, 54, 54), fill=(255, 255, 255))
-        menu = pystray.Menu(pystray.MenuItem('Cài đặt', self.show_window), pystray.MenuItem('Thoát', self.quit_app))
-        self.icon = pystray.Icon("WifiGemini", image, "WiFi Gemini Assistant", menu)
+        menu = pystray.Menu(
+            pystray.MenuItem('Cài đặt', self.show_window), 
+            pystray.MenuItem('Thoát', self.quit_app)
+        )
+        self.icon = pystray.Icon("WifiGemini", image, 
+                                "WiFi Gemini Assistant", menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
 
 if __name__ == "__main__":
