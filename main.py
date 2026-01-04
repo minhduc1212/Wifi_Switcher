@@ -14,6 +14,63 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
+# ============================================
+# PHẦN TỰ ĐỘNG ẨN CONSOLE WINDOW
+# ============================================
+def hide_console():
+    """Ẩn cửa sổ console trên Windows"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            # Lấy handle của console window
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd != 0:
+                # SW_HIDE = 0: Ẩn cửa sổ
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+                # Vô hiệu hóa nút Close
+                ctypes.windll.user32.EnableMenuItem(
+                    ctypes.windll.user32.GetSystemMenu(hwnd, False),
+                    0xF060,  # SC_CLOSE
+                    0x00000001  # MF_BYCOMMAND | MF_GRAYED
+                )
+        except Exception as e:
+            print(f"Không thể ẩn console: {e}")
+
+def restart_as_no_console():
+    """Khởi động lại ứng dụng với pythonw.exe (không console)"""
+    if sys.platform == "win32":
+        # Kiểm tra xem đang chạy bằng python.exe hay pythonw.exe
+        if "python.exe" in sys.executable.lower():
+            pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+            
+            if os.path.exists(pythonw):
+                try:
+                    # Khởi động lại với pythonw.exe
+                    subprocess.Popen(
+                        [pythonw] + sys.argv,
+                        creationflags=subprocess.CREATE_NO_WINDOW | 
+                                    subprocess.CREATE_NEW_PROCESS_GROUP | 
+                                    subprocess.DETACHED_PROCESS,
+                        cwd=os.getcwd(),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        stdin=subprocess.DEVNULL,
+                        close_fds=True
+                    )
+                    # Thoát instance hiện tại
+                    sys.exit(0)
+                except Exception as e:
+                    print(f"Không thể khởi động lại với pythonw: {e}")
+                    # Nếu không thể khởi động lại, ẩn console hiện tại
+                    hide_console()
+            else:
+                # Nếu không có pythonw.exe, chỉ ẩn console
+                hide_console()
+
+# Gọi hàm ẩn console ngay khi chương trình bắt đầu
+restart_as_no_console()
+# ============================================
+
 load_dotenv() 
 
 def get_gemini_client():
